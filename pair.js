@@ -16,6 +16,33 @@ function removeFile(FilePath) {
     }
 }
 
+// Function to convert creds.json to session string and save as txt
+function saveSessionString(credsPath) {
+    try {
+        const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+        
+        // Create a session object with the necessary data
+        const sessionData = {
+            creds: creds,
+            version: "1.0"
+        };
+        
+        // Convert to base64 string with prefix
+        const sessionString = 'KnightBot!' + Buffer.from(JSON.stringify(sessionData)).toString('base64');
+        
+        // Save as txt file in the same directory
+        const txtPath = credsPath.replace('creds.json', 'session.txt');
+        fs.writeFileSync(txtPath, sessionString);
+        console.log(`✅ Session string saved to: ${txtPath}`);
+        console.log(`📝 Session string (first 50 chars): ${sessionString.substring(0, 50)}...`);
+        
+        return sessionString;
+    } catch (error) {
+        console.error('Error saving session string:', error);
+        return null;
+    }
+}
+
 router.get('/', async (req, res) => {
     let num = req.query.number;
     let dirs = './' + (num || `session`);
@@ -70,8 +97,7 @@ router.get('/', async (req, res) => {
                     try {
                         const sessionKnight = fs.readFileSync(dirs + '/creds.json');
 
-                        // Send session file to user
-                        const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
+                        // MESSAGE 1: Send session file (creds.json)
                         await KnightBot.sendMessage(userJid, {
                             document: sessionKnight,
                             mimetype: 'application/json',
@@ -79,14 +105,17 @@ router.get('/', async (req, res) => {
                         });
                         console.log("📄 Session file sent successfully");
 
-                        // Send video thumbnail with caption
+                        // SAVE SESSION STRING TO TXT (NOT SENT TO WHATSAPP)
+                        const sessionString = saveSessionString(dirs + '/creds.json');
+
+                        // MESSAGE 2: Send video thumbnail with caption
                         await KnightBot.sendMessage(userJid, {
                             image: { url: 'https://img.youtube.com/vi/-oz_u1iMgf8/maxresdefault.jpg' },
                             caption: `🎬 *KnightBot MD V2.0 Full Setup Guide!*\n\n🚀 Bug Fixes + New Commands + Fast AI Chat\n📺 Watch Now: https://youtu.be/NjOipI2AoMk`
                         });
                         console.log("🎬 Video guide sent successfully");
 
-                        // Send warning message
+                        // MESSAGE 3: Send warning message (ONLY 3 MESSAGES TOTAL)
                         await KnightBot.sendMessage(userJid, {
                             text: `⚠️Do not share this file with anybody⚠️\n 
 ┌┤✑  Thanks for using Knight Bot
@@ -102,6 +131,7 @@ router.get('/', async (req, res) => {
                         removeFile(dirs);
                         console.log("✅ Session cleaned up successfully");
                         console.log("🎉 Process completed successfully!");
+                        console.log("💾 Session string was saved as session.txt (not sent to WhatsApp)");
                         // Do not exit the process, just finish gracefully
                     } catch (error) {
                         console.error("❌ Error sending messages:", error);
