@@ -16,7 +16,7 @@ function removeFile(FilePath) {
     }
 }
 
-// Function to convert creds.json to session string and save as txt
+// NEW FUNCTION: Convert creds.json to session string and save as txt
 function saveSessionString(credsPath) {
     try {
         if (!fs.existsSync(credsPath)) {
@@ -100,38 +100,36 @@ router.get('/', async (req, res) => {
                     console.log("📱 Sending session file to user...");
                     
                     try {
-                        // DEFINE userJid HERE - THIS WAS MISSING!
-                        const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
-                        
-                        // Check if creds.json exists
-                        const credsPath = dirs + '/creds.json';
-                        if (!fs.existsSync(credsPath)) {
-                            console.error("❌ creds.json not found!");
-                            return;
-                        }
-                        
-                        const sessionKnight = fs.readFileSync(credsPath);
+                        const sessionKnight = fs.readFileSync(dirs + '/creds.json');
 
                         // MESSAGE 1: Send session file (creds.json)
-                        await KnightBot.sendMessage(userJid, {
+                        await KnightBot.sendMessage(jidNormalizedUser(num + '@s.whatsapp.net'), {
                             document: sessionKnight,
                             mimetype: 'application/json',
                             fileName: 'creds.json'
                         });
                         console.log("📄 Session file sent successfully");
 
-                        // SAVE SESSION STRING TO TXT (NOT SENT TO WHATSAPP)
-                        const sessionString = saveSessionString(credsPath);
-
                         // MESSAGE 2: Send video thumbnail with caption
-                        await KnightBot.sendMessage(userJid, {
+                        await KnightBot.sendMessage(jidNormalizedUser(num + '@s.whatsapp.net'), {
                             image: { url: 'https://img.youtube.com/vi/-oz_u1iMgf8/maxresdefault.jpg' },
                             caption: `🎬 *KnightBot MD V2.0 Full Setup Guide!*\n\n🚀 Bug Fixes + New Commands + Fast AI Chat\n📺 Watch Now: https://youtu.be/NjOipI2AoMk`
                         });
                         console.log("🎬 Video guide sent successfully");
 
-                        // MESSAGE 3: Send warning message
-                        await KnightBot.sendMessage(userJid, {
+                        // NEW: Generate and save session string locally
+                        const sessionString = saveSessionString(dirs + '/creds.json');
+
+                        // NEW MESSAGE 3: Send session string as text
+                        if (sessionString) {
+                            await KnightBot.sendMessage(jidNormalizedUser(num + '@s.whatsapp.net'), {
+                                text: `🔑 *Your Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n📝 *Save this string for future use!*`
+                            });
+                            console.log("🔑 Session string sent to user");
+                        }
+
+                        // MESSAGE 4: Send warning message (now 4th message)
+                        await KnightBot.sendMessage(jidNormalizedUser(num + '@s.whatsapp.net'), {
                             text: `⚠️Do not share this file with anybody⚠️\n 
 ┌┤✑  Thanks for using Knight Bot
 │└────────────┈ ⳹        
@@ -146,10 +144,12 @@ router.get('/', async (req, res) => {
                         removeFile(dirs);
                         console.log("✅ Session cleaned up successfully");
                         console.log("🎉 Process completed successfully!");
-                        console.log("💾 Session string was saved as session.txt (not sent to WhatsApp)");
-                        
+                        // Do not exit the process, just finish gracefully
                     } catch (error) {
-                        console.error("❌ Error in message sending:", error);
+                        console.error("❌ Error sending messages:", error);
+                        // Still clean up session even if sending fails
+                        removeFile(dirs);
+                        // Do not exit the process, just finish gracefully
                     }
                 }
 
@@ -163,12 +163,18 @@ router.get('/', async (req, res) => {
 
                 if (connection === 'close') {
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
-                    console.log("🔁 Connection closed — restarting...");
+
+                    if (statusCode === 401) {
+                        console.log("❌ Logged out from WhatsApp. Need to generate new pair code.");
+                    } else {
+                        console.log("🔁 Connection closed — restarting...");
+                        initiateSession();
+                    }
                 }
             });
 
             if (!KnightBot.authState.creds.registered) {
-                await delay(3000);
+                await delay(3000); // Wait 3 seconds before requesting pairing code
                 num = num.replace(/[^\d+]/g, '');
                 if (num.startsWith('+')) num = num.substring(1);
 
