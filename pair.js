@@ -6,6 +6,9 @@ import pn from 'awesome-phonenumber';
 
 const router = express.Router();
 
+// Track active sessions to prevent duplicates
+const activeSessions = new Set();
+
 // Ensure the session directory exists
 function removeFile(FilePath) {
     try {
@@ -52,6 +55,15 @@ router.get('/', async (req, res) => {
     let num = req.query.number;
     let dirs = './' + (num || `session`);
 
+    // Check if session already exists for this number
+    if (activeSessions.has(num)) {
+        console.log(`⚠️ Session already active for ${num}, ignoring duplicate request`);
+        return res.status(429).send({ code: 'Session already in progress for this number' });
+    }
+    
+    // Add to active sessions
+    activeSessions.add(num);
+
     // Remove existing session if present
     await removeFile(dirs);
 
@@ -61,6 +73,7 @@ router.get('/', async (req, res) => {
     // Validate the phone number using awesome-phonenumber
     const phone = pn('+' + num);
     if (!phone.isValid()) {
+        activeSessions.delete(num);
         if (!res.headersSent) {
             return res.status(400).send({ code: 'Invalid phone number. Please enter your full international number (e.g., 15551234567 for US, 447911123456 for UK, 84987654321 for Vietnam, etc.) without + or spaces.' });
         }
@@ -100,10 +113,11 @@ router.get('/', async (req, res) => {
                     console.log("📱 Sending session file to user...");
                     
                     try {
+                        const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
                         const sessionKnight = fs.readFileSync(dirs + '/creds.json');
 
                         // MESSAGE 1: Send session file (creds.json)
-                        await KnightBot.sendMessage(jidNormalizedUser(num + '@s.whatsapp.net'), {
+                        await KnightBot.sendMessage(userJid, {
                             document: sessionKnight,
                             mimetype: 'application/json',
                             fileName: 'creds.json'
@@ -111,25 +125,25 @@ router.get('/', async (req, res) => {
                         console.log("📄 Session file sent successfully");
 
                         // MESSAGE 2: Send video thumbnail with caption
-                        await KnightBot.sendMessage(jidNormalizedUser(num + '@s.whatsapp.net'), {
+                        await KnightBot.sendMessage(userJid, {
                             image: { url: 'https://img.youtube.com/vi/-oz_u1iMgf8/maxresdefault.jpg' },
                             caption: `🎬 *KnightBot MD V2.0 Full Setup Guide!*\n\n🚀 Bug Fixes + New Commands + Fast AI Chat\n📺 Watch Now: https://youtu.be/NjOipI2AoMk`
                         });
                         console.log("🎬 Video guide sent successfully");
 
-                        // NEW: Generate and save session string locally
+                        // Generate and save session string locally (BEFORE deleting)
                         const sessionString = saveSessionString(dirs + '/creds.json');
 
-                        // NEW MESSAGE 3: Send session string as text
+                        // MESSAGE 3: Send session string as text
                         if (sessionString) {
-                            await KnightBot.sendMessage(jidNormalizedUser(num + '@s.whatsapp.net'), {
+                            await KnightBot.sendMessage(userJid, {
                                 text: `🔑 *Your Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n📝 *Save this string for future use!*`
                             });
                             console.log("🔑 Session string sent to user");
                         }
 
-                        // MESSAGE 4: Send warning message (now 4th message)
-                        await KnightBot.sendMessage(jidNormalizedUser(num + '@s.whatsapp.net'), {
+                        // MESSAGE 4: Send warning message
+                        await KnightBot.sendMessage(userJid, {
                             text: `⚠️Do not share this file with anybody⚠️\n 
 ┌┤✑  Thanks for using Knight Bot
 │└────────────┈ ⳹        
@@ -138,18 +152,24 @@ router.get('/', async (req, res) => {
                         });
                         console.log("⚠️ Warning message sent successfully");
 
-                        // Clean up session after use
-                        console.log("🧹 Cleaning up session...");
-                        await delay(1000);
-                        removeFile(dirs);
-                        console.log("✅ Session cleaned up successfully");
-                        console.log("🎉 Process completed successfully!");
-                        // Do not exit the process, just finish gracefully
+                        console.log("📁 Files are saved at: " + dirs);
+                        console.log("   - " + dirs + "/creds.json");
+                        console.log("   - " + dirs + "/session.txt");
+                        console.log("💾 These files will NOT be deleted");
+                        
+                        // DO NOT delete files - comment out removeFile
+                        // console.log("🧹 Cleaning up session...");
+                        // await delay(1000);
+                        // removeFile(dirs);
+                        
+                        console.log("✅ Process completed successfully!");
+                        
+                        // Remove from active sessions
+                        activeSessions.delete(num);
+                        
                     } catch (error) {
                         console.error("❌ Error sending messages:", error);
-                        // Still clean up session even if sending fails
-                        removeFile(dirs);
-                        // Do not exit the process, just finish gracefully
+                        activeSessions.delete(num);
                     }
                 }
 
@@ -166,9 +186,12 @@ router.get('/', async (req, res) => {
 
                     if (statusCode === 401) {
                         console.log("❌ Logged out from WhatsApp. Need to generate new pair code.");
+                        activeSessions.delete(num);
                     } else {
-                        console.log("🔁 Connection closed — restarting...");
-                        initiateSession();
+                        console.log("🔁 Connection closed — NOT restarting to prevent duplicates");
+                        // Don't restart to prevent duplicates
+                        // initiateSession();
+                        activeSessions.delete(num);
                     }
                 }
             });
@@ -190,6 +213,7 @@ router.get('/', async (req, res) => {
                     if (!res.headersSent) {
                         res.status(503).send({ code: 'Failed to get pairing code. Please check your phone number and try again.' });
                     }
+                    activeSessions.delete(num);
                 }
             }
 
@@ -199,6 +223,7 @@ router.get('/', async (req, res) => {
             if (!res.headersSent) {
                 res.status(503).send({ code: 'Service Unavailable' });
             }
+            activeSessions.delete(num);
         }
     }
 
