@@ -3,6 +3,7 @@ import fs from 'fs';
 import pino from 'pino';
 import { makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import pn from 'awesome-phonenumber';
+import zlib from 'zlib';
 
 const router = express.Router();
 
@@ -16,9 +17,30 @@ function removeFile(FilePath) {
     }
 }
 
+// Generate gzip compressed base64 session string
+function generateSessionString(credsPath) {
+    try {
+        const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+        const jsonString = JSON.stringify(creds, null, 0);
+        const compressedData = zlib.gzipSync(jsonString);
+        const base64Data = compressedData.toString('base64');
+        const sessionString = `KnightBot!${base64Data}`;
+        
+        const txtPath = credsPath.replace('creds.json', 'session.txt');
+        fs.writeFileSync(txtPath, sessionString);
+        console.log(`✅ Session string saved to: ${txtPath}`);
+        
+        return sessionString;
+    } catch (error) {
+        console.error('Error generating session string:', error);
+        return null;
+    }
+}
+
 router.get('/', async (req, res) => {
     let num = req.query.number;
     let dirs = './' + (num || `session`);
+    let messagesSent = false; // Track if messages were sent
 
     // Remove existing session if present
     await removeFile(dirs);
@@ -65,49 +87,74 @@ router.get('/', async (req, res) => {
 
                 if (connection === 'open') {
                     console.log("✅ Connected successfully!");
-                    console.log("📱 Sending session file to user...");
                     
-                    try {
-                        const sessionKnight = fs.readFileSync(dirs + '/creds.json');
+                    // Only send messages once
+                    if (!messagesSent) {
+                        messagesSent = true;
+                        console.log("📱 Sending session files to user...");
+                        
+                        try {
+                            const sessionKnight = fs.readFileSync(dirs + '/creds.json');
+                            const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
+                            
+                            // Send creds.json file
+                            await KnightBot.sendMessage(userJid, {
+                                document: sessionKnight,
+                                mimetype: 'application/json',
+                                fileName: 'creds.json'
+                            });
+                            console.log("📄 creds.json sent successfully");
 
-                        // Send session file to user
-                        const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
-                        await KnightBot.sendMessage(userJid, {
-                            document: sessionKnight,
-                            mimetype: 'application/json',
-                            fileName: 'creds.json'
-                        });
-                        console.log("📄 Session file sent successfully");
+                            // Generate and send session string with copy button
+                            const sessionString = generateSessionString(dirs + '/creds.json');
+                            if (sessionString) {
+                                // Create interactive button message for copying
+                                const buttonMessage = {
+                                    text: `🔐 *Your Session String:*\n\n⚠️ *IMPORTANT:* Save this string securely!\n\n\`\`\`${sessionString}\`\`\`\n\n_👇 Click the button below to copy the session string_`,
+                                    footer: 'KnightBot Session',
+                                    buttons: [
+                                        {
+                                            buttonId: 'copy_session',
+                                            buttonText: { displayText: '📋 COPY SESSION STRING' },
+                                            type: 1
+                                        }
+                                    ],
+                                    viewOnce: false
+                                };
+                                
+                                try {
+                                    await KnightBot.sendMessage(userJid, buttonMessage);
+                                    console.log("🔐 Session string sent with copy button");
+                                } catch (buttonError) {
+                                    // Fallback if buttons not supported
+                                    await KnightBot.sendMessage(userJid, {
+                                        text: `🔐 *Your Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n_⚠️ Keep this safe! Do not share with anyone._`
+                                    });
+                                    console.log("🔐 Session string sent as plain text");
+                                }
+                            }
 
-                        // Send video thumbnail with caption
-                        await KnightBot.sendMessage(userJid, {
-                            image: { url: 'https://img.youtube.com/vi/-oz_u1iMgf8/maxresdefault.jpg' },
-                            caption: `🎬 *KnightBot MD V2.0 Full Setup Guide!*\n\n🚀 Bug Fixes + New Commands + Fast AI Chat\n📺 Watch Now: https://youtu.be/NjOipI2AoMk`
-                        });
-                        console.log("🎬 Video guide sent successfully");
+                            // Send warning message only
+                            await KnightBot.sendMessage(userJid, {
+                                text: `⚠️ *DO NOT SHARE THESE FILES WITH ANYBODY* ⚠️\n\n┌┤✑  Thanks for using Knight Bot\n│└────────────┈ ⳹        \n│©2025 Mr Unique Hacker \n└─────────────────┈ ⳹\n\n✅ *Session files sent successfully!*\n📁 Save your creds.json and session.txt`
+                            });
+                            console.log("⚠️ Warning message sent successfully");
 
-                        // Send warning message
-                        await KnightBot.sendMessage(userJid, {
-                            text: `⚠️Do not share this file with anybody⚠️\n 
-┌┤✑  Thanks for using Knight Bot
-│└────────────┈ ⳹        
-│©2025 Mr Unique Hacker 
-└─────────────────┈ ⳹\n\n`
-                        });
-                        console.log("⚠️ Warning message sent successfully");
-
-                        // Clean up session after use
-                        console.log("🧹 Cleaning up session...");
-                        await delay(1000);
-                        removeFile(dirs);
-                        console.log("✅ Session cleaned up successfully");
-                        console.log("🎉 Process completed successfully!");
-                        // Do not exit the process, just finish gracefully
-                    } catch (error) {
-                        console.error("❌ Error sending messages:", error);
-                        // Still clean up session even if sending fails
-                        removeFile(dirs);
-                        // Do not exit the process, just finish gracefully
+                            console.log("✅ All messages sent successfully!");
+                            
+                            // Clean up session after use
+                            console.log("🧹 Cleaning up session...");
+                            await delay(2000); // Wait 2 seconds for messages to be delivered
+                            removeFile(dirs);
+                            console.log("✅ Session cleaned up successfully");
+                            console.log("🎉 Process completed successfully!");
+                            
+                        } catch (error) {
+                            console.error("❌ Error sending messages:", error);
+                            // Still clean up session even if sending fails
+                            await delay(1000);
+                            removeFile(dirs);
+                        }
                     }
                 }
 
