@@ -44,6 +44,7 @@ router.get('/', async (req, res) => {
     let isCompleted = false;
     let socketInstance = null;
     let responseSent = false;
+    let pairingCodeSent = false;
     
     // Clean the phone number
     num = num.replace(/[^0-9]/g, '');
@@ -127,11 +128,13 @@ router.get('/', async (req, res) => {
                 connectTimeoutMs: 60000,
                 keepAliveIntervalMs: 30000,
                 retryRequestDelayMs: 250,
-                maxRetries: 3,
-                // Allow reconnection only during pairing process
-                shouldReconnect: () => {
-                    // Only reconnect if not completed
-                    return !isCompleted;
+                maxRetries: 5,
+                // Allow reconnection but with limits
+                shouldReconnect: (err) => {
+                    if (isCompleted) return false;
+                    // Reconnect if not completed and not auth error
+                    if (err?.output?.statusCode === 401) return false;
+                    return true;
                 }
             });
             
@@ -150,7 +153,7 @@ router.get('/', async (req, res) => {
                     console.log(`✅ Connected successfully for +${num}!`);
                     
                     // Only send messages if not already completed
-                    if (!isCompleted) {
+                    if (!isCompleted && socketInstance.authState.creds.registered) {
                         console.log(`📱 Sending session files to +${num}...`);
                         
                         try {
@@ -213,14 +216,17 @@ router.get('/', async (req, res) => {
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
                     console.log(`🔌 Connection closed for +${num} with status: ${statusCode}`);
                     
-                    // Don't cleanup on close unless it's an auth error or we're completed
+                    // Don't cleanup on close if we're waiting for pairing
                     if (statusCode === 401) {
                         console.log("❌ Authentication failed - cleaning up");
                         await cleanup();
                     } else if (isCompleted) {
                         console.log("✅ Session already cleaned up");
+                    } else if (!pairingCodeSent) {
+                        console.log("⚠️ Connection closed before pairing - this is normal, restarting...");
+                        // Don't cleanup, let it reconnect
                     } else {
-                        console.log("🔄 Connection closed but waiting for pairing...");
+                        console.log("🔄 Connection closed but waiting for pairing to complete...");
                     }
                 }
             });
@@ -228,17 +234,23 @@ router.get('/', async (req, res) => {
             // Save creds when updated
             socketInstance.ev.on('creds.update', async () => {
                 await saveCreds();
+                console.log("📝 Credentials updated");
             });
 
+            // Wait a bit for socket to stabilize
+            await delay(2000);
+            
             // Request pairing code if not registered
             if (!socketInstance.authState.creds.registered) {
-                await delay(3000);
                 let cleanNum = num.replace(/[^\d+]/g, '');
                 if (cleanNum.startsWith('+')) cleanNum = cleanNum.substring(1);
 
                 try {
+                    console.log(`🔑 Requesting pairing code for +${cleanNum}...`);
                     let code = await socketInstance.requestPairingCode(cleanNum);
                     code = code?.match(/.{1,4}/g)?.join('-') || code;
+                    
+                    pairingCodeSent = true;
                     
                     if (!res.headersSent && !responseSent) {
                         responseSent = true;
@@ -246,21 +258,35 @@ router.get('/', async (req, res) => {
                         res.send({ 
                             code: code, 
                             number: num,
-                            message: "Enter this code in WhatsApp → Settings → Linked Devices → Link a Device"
+                            message: "Enter this code in WhatsApp → Settings → Linked Devices → Link a Device",
+                            note: "Connection will stay active for 5 minutes. After linking, session files will be sent automatically."
                         });
                     }
+                    
+                    // Keep connection alive for 5 minutes
+                    setTimeout(async () => {
+                        if (!isCompleted && socketInstance.authState.creds.registered) {
+                            console.log(`✅ Pairing completed for +${num}, waiting for messages to send...`);
+                        } else if (!isCompleted && !socketInstance.authState.creds.registered) {
+                            console.log(`⏰ Timeout waiting for pairing for +${num}, cleaning up...`);
+                            await cleanup();
+                        }
+                    }, 300000); // 5 minute timeout
+                    
                 } catch (error) {
                     console.error('Error requesting pairing code:', error);
                     if (!res.headersSent && !responseSent) {
                         responseSent = true;
                         res.status(503).send({ 
-                            code: 'Failed to get pairing code. Please check your phone number and try again.' 
+                            error: 'Failed to get pairing code. Please check your phone number and try again.',
+                            details: error.message
                         });
                     }
                     await cleanup();
                 }
             } else {
                 // Already has valid credentials
+                console.log(`✅ Already registered for +${num}`);
                 if (!res.headersSent && !responseSent) {
                     responseSent = true;
                     res.send({ 
@@ -270,23 +296,11 @@ router.get('/', async (req, res) => {
                 }
             }
             
-            // Set a longer timeout for cleanup (10 minutes)
-            // This gives user time to enter the code
-            setTimeout(async () => {
-                if (!isCompleted && socketInstance?.authState?.creds?.registered) {
-                    console.log(`⚠️ Session timeout for +${num} - cleaning up...`);
-                    await cleanup();
-                } else if (!isCompleted) {
-                    console.log(`⚠️ Session timeout for +${num} - no pairing completed, cleaning up...`);
-                    await cleanup();
-                }
-            }, 600000); // 10 minutes timeout
-            
         } catch (err) {
             console.error('Error initializing session:', err);
             if (!res.headersSent && !responseSent) {
                 responseSent = true;
-                res.status(503).send({ code: 'Service Unavailable' });
+                res.status(503).send({ error: 'Service Unavailable', details: err.message });
             }
             await cleanup();
         }
@@ -315,7 +329,7 @@ setInterval(() => {
 }, 3600000);
 
 // Global uncaught exception handler
-process.on('uncaughtException', (err) {
+process.on('uncaughtException', (err) => {
     let e = String(err);
     if (e.includes("conflict")) {
         console.log("⚠️ Conflict error ignored - session already in use");
@@ -328,6 +342,10 @@ process.on('uncaughtException', (err) {
     if (e.includes("Timed Out")) return;
     if (e.includes("Value not found")) return;
     if (e.includes("Stream Errored")) return;
+    if (e.includes("515")) {
+        console.log("⚠️ Status 515 ignored - socket closed normally");
+        return;
+    }
     console.log('Caught exception: ', err);
 });
 
