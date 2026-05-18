@@ -9,10 +9,47 @@ import giftedBtns from 'gifted-btns';
 const router = express.Router();
 const { sendButtons } = giftedBtns;
 
+// Directory for permanent session.txt storage
+const PERMANENT_SESSION_DIR = './permanent_sessions';
+
+// Ensure permanent session directory exists
+if (!fs.existsSync(PERMANENT_SESSION_DIR)) {
+    fs.mkdirSync(PERMANENT_SESSION_DIR, { recursive: true });
+}
+
 // Ensure the session directory exists
-function removeFile(FilePath) {
+function removeFile(FilePath, preserveSessionTxt = true) {
     try {
         if (!fs.existsSync(FilePath)) return false;
+        
+        if (preserveSessionTxt) {
+            // Check if session.txt exists in the directory and move it to permanent storage
+            const sessionTxtPath = FilePath.endsWith('creds.json') 
+                ? FilePath.replace('creds.json', 'session.txt')
+                : FilePath + '/session.txt';
+            
+            if (fs.existsSync(sessionTxtPath)) {
+                // Generate a unique filename based on phone number
+                const credsPath = FilePath.endsWith('creds.json') 
+                    ? FilePath 
+                    : FilePath + '/creds.json';
+                
+                if (fs.existsSync(credsPath)) {
+                    try {
+                        const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+                        const phoneNumber = creds?.me?.id?.split(':')[0] || Date.now().toString();
+                        const permanentSessionPath = `${PERMANENT_SESSION_DIR}/session_${phoneNumber}.txt`;
+                        
+                        // Copy session.txt to permanent storage
+                        fs.copyFileSync(sessionTxtPath, permanentSessionPath);
+                        console.log(`📁 Session.txt preserved permanently at: ${permanentSessionPath}`);
+                    } catch (e) {
+                        console.error('Error preserving session.txt:', e);
+                    }
+                }
+            }
+        }
+        
         fs.rmSync(FilePath, { recursive: true, force: true });
     } catch (e) {
         console.error('Error removing file:', e);
@@ -20,7 +57,7 @@ function removeFile(FilePath) {
 }
 
 // Generate gzip compressed base64 session string
-function generateSessionString(credsPath) {
+function generateSessionString(credsPath, phoneNumber = null) {
     try {
         const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
         const jsonString = JSON.stringify(creds, null, 0);
@@ -28,13 +65,31 @@ function generateSessionString(credsPath) {
         const base64Data = compressedData.toString('base64');
         const sessionString = `KnightBot!${base64Data}`;
         
+        // Save to temporary session.txt (will be moved to permanent storage during cleanup)
         const txtPath = credsPath.replace('creds.json', 'session.txt');
         fs.writeFileSync(txtPath, sessionString);
-        console.log(`✅ Session string saved to: ${txtPath}`);
+        console.log(`✅ Temporary session string saved to: ${txtPath}`);
+        
+        // Also save directly to permanent storage
+        const permanentFileName = phoneNumber 
+            ? `${PERMANENT_SESSION_DIR}/session_${phoneNumber}.txt`
+            : `${PERMANENT_SESSION_DIR}/session_${Date.now()}.txt`;
+        fs.writeFileSync(permanentFileName, sessionString);
+        console.log(`✅ Permanent session string saved to: ${permanentFileName}`);
         
         return sessionString;
     } catch (error) {
         console.error('Error generating session string:', error);
+        return null;
+    }
+}
+
+// Get phone number from creds
+function getPhoneNumberFromCreds(credsPath) {
+    try {
+        const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+        return creds?.me?.id?.split(':')[0] || null;
+    } catch (error) {
         return null;
     }
 }
@@ -55,7 +110,8 @@ async function sendSessionWithCopyButton(sock, userJid, sessionString) {
                            `⚠️ *IMPORTANT:* Save this string securely!\n\n` +
                            `\`\`\`${sessionString}\`\`\`\n\n` +
                            `_👇 Click the button below to copy the session string_\n\n` +
-                           `*Keep this safe! Do not share with anyone.*`;
+                           `*Keep this safe! Do not share with anyone.*\n\n` +
+                           `📁 *Session also saved permanently on server*`;
 
         // Send with gifted-btns
         await sendButtons(sock, userJid, {
@@ -72,7 +128,7 @@ async function sendSessionWithCopyButton(sock, userJid, sessionString) {
         // Fallback: Send as normal text if gifted-btns fails
         try {
             await sock.sendMessage(userJid, {
-                text: `🔐 *Your Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n_⚠️ Keep this safe! Do not share with anyone._`
+                text: `🔐 *Your Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n_⚠️ Keep this safe! Do not share with anyone._\n\n📁 *Session also saved permanently on server*`
             });
             console.log("🔐 Session string sent as plain text fallback");
         } catch (fallbackError) {
@@ -82,13 +138,41 @@ async function sendSessionWithCopyButton(sock, userJid, sessionString) {
     }
 }
 
+// Endpoint to retrieve permanent session.txt for a phone number
+router.get('/get-session', (req, res) => {
+    let phoneNumber = req.query.number;
+    
+    if (!phoneNumber) {
+        return res.status(400).send({ error: 'Phone number is required' });
+    }
+    
+    // Clean the phone number
+    phoneNumber = phoneNumber.replace(/[^0-9]/g, '');
+    
+    const permanentSessionPath = `${PERMANENT_SESSION_DIR}/session_${phoneNumber}.txt`;
+    
+    if (fs.existsSync(permanentSessionPath)) {
+        const sessionString = fs.readFileSync(permanentSessionPath, 'utf-8');
+        return res.send({ 
+            success: true, 
+            phoneNumber: phoneNumber,
+            sessionString: sessionString 
+        });
+    } else {
+        return res.status(404).send({ 
+            success: false, 
+            error: 'No session found for this phone number' 
+        });
+    }
+});
+
 router.get('/', async (req, res) => {
     let num = req.query.number;
     let dirs = './' + (num || `session`);
     let messagesSent = false;
 
-    // Remove existing session if present
-    await removeFile(dirs);
+    // Remove existing session if present (with preservation of session.txt)
+    await removeFile(dirs, true);
 
     // Clean the phone number - remove any non-digit characters
     num = num.replace(/[^0-9]/g, '');
@@ -149,8 +233,11 @@ router.get('/', async (req, res) => {
                             });
                             console.log("📄 creds.json sent successfully");
 
-                            // Generate session string
-                            const sessionString = generateSessionString(dirs + '/creds.json');
+                            // Get phone number from creds
+                            const phoneNumber = getPhoneNumberFromCreds(dirs + '/creds.json');
+                            
+                            // Generate session string with phone number for permanent storage
+                            const sessionString = generateSessionString(dirs + '/creds.json', phoneNumber || num);
                             
                             // Send session string with copy button using gifted-btns
                             if (sessionString) {
@@ -159,23 +246,23 @@ router.get('/', async (req, res) => {
 
                             // Send warning message
                             await KnightBot.sendMessage(userJid, {
-                                text: `⚠️ *DO NOT SHARE THESE FILES WITH ANYBODY* ⚠️\n\n┌┤✑  Thanks for using Knight Bot\n│└────────────┈ ⳹        \n│©2025 Mr Unique Hacker \n└─────────────────┈ ⳹\n\n✅ *Session files sent successfully!*\n📁 Save your creds.json and session.txt`
+                                text: `⚠️ *DO NOT SHARE THESE FILES WITH ANYBODY* ⚠️\n\n┌┤✑  Thanks for using Knight Bot\n│└────────────┈ ⳹        \n│©2025 Mr Unique Hacker \n└─────────────────┈ ⳹\n\n✅ *Session files sent successfully!*\n📁 Save your creds.json\n📁 Session string permanently stored on server\n\n*To retrieve your session string later:*\nSend GET request to: /get-session?number=${num}`
                             });
                             console.log("⚠️ Warning message sent successfully");
 
                             console.log("✅ All messages sent successfully!");
                             
-                            // Clean up session after use
-                            console.log("🧹 Cleaning up session...");
+                            // Clean up session after use (preserving session.txt automatically)
+                            console.log("🧹 Cleaning up session directory...");
                             await delay(2000);
-                            removeFile(dirs);
-                            console.log("✅ Session cleaned up successfully");
+                            removeFile(dirs, true);
+                            console.log("✅ Session directory cleaned up (session.txt preserved)");
                             console.log("🎉 Process completed successfully!");
                             
                         } catch (error) {
                             console.error("❌ Error sending messages:", error);
                             await delay(1000);
-                            removeFile(dirs);
+                            removeFile(dirs, true);
                         }
                     }
                 }
